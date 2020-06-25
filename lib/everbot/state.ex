@@ -1,4 +1,5 @@
-defmodule Everbot.MainState do
+defmodule Everbot.State do
+  alias Discord.Sensitive
   # States:
   # - waiting_on_connection
   # -
@@ -20,12 +21,14 @@ defmodule Everbot.MainState do
   end
 
   def get_bot_token(state) do
-    {:ok, content} = File.read("~/secrets/bot_token")
+    {:ok, content} = File.read("/home/eversome/secrets/bot_token")
 
     bot_token =
-      content
-      |> String.split("\n", trim: true)
-      |> hd()
+      Sensitive.new(
+        content
+        |> String.split("\n", trim: true)
+        |> hd()
+      )
 
     %{state | bot_token: bot_token}
   end

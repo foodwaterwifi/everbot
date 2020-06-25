@@ -1,4 +1,4 @@
-defmodule Discord.Intents do
+defmodule Discord.Gateway.Intents do
   use Bitwise, only_operators: true
 
   @intents %{
@@ -19,10 +19,12 @@ defmodule Discord.Intents do
     direct_message_typing: 1 <<< 14
   }
 
-  def compute_intents(intents), do: do_compute_intents(intents, 0)
+  def new(intents) when is_number(intents), do: intents
 
-  def do_compute_intents([intent | rest], acc),
-    do: do_compute_intents(rest, acc + Map.fetch!(@intents, intent))
+  def new(intents) when is_list(intents), do: parse_intents(intents, 0)
 
-  def do_compute_intents([], acc), do: acc
+  defp parse_intents([intent | rest], acc),
+    do: parse_intents(rest, acc + Map.fetch!(@intents, intent))
+
+  defp parse_intents([], acc), do: acc
 end

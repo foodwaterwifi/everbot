@@ -1,5 +1,5 @@
 defmodule Everbot do
-  require Everbot.MainState, as: State
+  require Everbot.State, as: State
   require Discord.Gateway.Server, as: GatewayServer
 
   @moduledoc """
@@ -23,7 +23,13 @@ defmodule Everbot do
 
     IO.puts("Main state: #{Kernel.inspect(state)}")
 
-    {:ok, pid} = GatewayServer.start_link(self(), state.gateway_url, state.bot_token)
+    intents = [
+      :guilds,
+      :guild_messages
+    ]
+
+    {:ok, pid} = GatewayServer.start_link(self(), state.gateway_url, state.bot_token, intents)
+
     IO.puts("Started Gateway Server, pid: #{pid}")
   end
 end

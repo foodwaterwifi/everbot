@@ -4,10 +4,10 @@ defmodule Discord.Gateway.Commands.Heartbeat do
     after the Opcode 10 Hello payload is received. The inner d key is the last sequence number—s—received
     by the client. If you have not yet received one, send null.
   """
-  def new(state = %{seq: seq}) do
+  def new(_state = %{seq: seq}) do
     %{
-      op: 1,
-      d: seq
+      "op" => 1,
+      "d" => seq
     }
   end
 end
