@@ -2,10 +2,9 @@ defmodule Discord.Gateway.Server do
   @moduledoc false
   # require ExUnit.Assertions
 
-  alias Discord.Gateway.State, as: State
-  alias Discord.Gateway.Handlers, as: Handlers
-  alias Discord.Gateway.Commands, as: Commands
-  alias Discord.EtfFormat, as: EtfFormat
+  alias Discord.Gateway.ServerHandlers
+  alias Discord.Gateway.State
+  alias Discord.Gateway.MessageHandlers
   # alias Commands.{Heartbeat, Identify}
 
   use GenServer
@@ -13,27 +12,19 @@ defmodule Discord.Gateway.Server do
   @version_and_encoding "/?v=6&encoding=etf"
 
   def start_link(agent_pid, gateway_url, bot_token, intents) do
-    {:ok, pid} =
-      GenServer.start_link(__MODULE__, State.new(agent_pid, gateway_url, bot_token, intents))
+    {:ok, pid} = GenServer.start_link(__MODULE__, {agent_pid, gateway_url, bot_token, intents})
 
     connect(pid)
     {:ok, pid}
   end
 
-  def init(state = %State{}) do
-    {:ok, state}
-  end
-
-  # Private Interface
-
-  defp send_frame(conn_pid, message) do
-    IO.puts("Sending frame: #{Kernel.inspect(message)}")
-    :gun.ws_send(conn_pid, {:binary, EtfFormat.encode(message)})
+  def init({agent_pid, gateway_url, bot_token, intents}) do
+    {:ok, State.new(self(), agent_pid, gateway_url, bot_token, intents)}
   end
 
   # Async Calls
 
-  defp connect(pid) do
+  def connect(pid) do
     GenServer.cast(pid, :connect)
   end
 
@@ -56,65 +47,8 @@ defmodule Discord.Gateway.Server do
     GenServer.cast(pid, {:send_identify, stream_ref})
   end
 
-  # Async Call Handlers
-
-  defp connect_handler(state = %State{gateway_url: "wss://" <> gateway_url}) do
-    IO.puts("Attempting to connect to Discord Gateway...")
-
-    {:ok, _conn_pid} =
-      :gun.open(String.to_charlist(gateway_url), 443, %{
-        # we handle our own reconnections so we don't have to keep track of gun's retries
-        retry: 0,
-        # use :http and not :http2 because WS over HTTP/2 is not supported by gun as of 6/21/2020
-        protocols: [:http]
-      })
-
-    {:noreply, state |> State.set_server_pid(self())}
-  end
-
-  defp disconnect_handler(state = %State{stream_ref: stream_ref}, last_stream_ref)
-       when is_nil(stream_ref) or stream_ref != last_stream_ref,
-       do: {:noreply, state}
-
-  defp disconnect_handler(state = %State{conn_pid: conn_pid}, _last_stream_ref) do
-    :gun.shutdown(conn_pid)
-    {:noreply, State.clear_conn_data(state)}
-  end
-
-  # Heartbeat needs the extra guard because its messages are scheduled
-  defp send_heartbeat_handler(state = %State{stream_ref: stream_ref}, last_stream_ref)
-       when is_nil(stream_ref) or stream_ref != last_stream_ref,
-       do: {:noreply, state}
-
-  defp send_heartbeat_handler(
-         state = %State{
-           conn_pid: conn_pid,
-           stream_ref: stream_ref,
-           hb_interval: hb_interval,
-           hb_acked: hb_acked
-         },
-         _last_stream_ref
-       ) do
-    if hb_acked do
-      schedule_heartbeat(self(), hb_interval, stream_ref)
-      send_frame(conn_pid, Commands.Heartbeat.new(state))
-      {:noreply, State.unset_hb_acked(state)}
-    else
-      # TODO: "If a client does not receive a heartbeat ack between its attempts at sending heartbeats,
-      # it should immediately terminate the connection with a non-1000 close code, reconnect, and attempt to resume."
-      :gun.close(conn_pid)
-      {:noreply, state}
-    end
-  end
-
-  defp send_identify_handler(state = %State{stream_ref: stream_ref}, last_stream_ref)
-       when is_nil(stream_ref) or stream_ref != last_stream_ref,
-       do: {:noreply, state}
-
-  defp send_identify_handler(state = %State{conn_pid: conn_pid}, _last_stream_ref) do
-    send_frame(conn_pid, Commands.Identify.new(state))
-
-    {:noreply, state}
+  def send_resume(pid, stream_ref, session_id) do
+    GenServer.cast(pid, {:send_resume, stream_ref, session_id})
   end
 
   # Event Handlers
@@ -138,7 +72,7 @@ defmodule Discord.Gateway.Server do
 
     {:binary, binary_message} = frame
 
-    {:ok, state} = Handlers.handle_message(binary_message, state)
+    {:ok, state} = MessageHandlers.handle_message(binary_message, state)
 
     {:noreply, state}
   end
@@ -146,11 +80,14 @@ defmodule Discord.Gateway.Server do
   defp on_gun_down(state = %State{}) do
     IO.puts("Lost connection to Discord Gateway.")
 
-    # TODO: make sure we handle any requests that did not get a reply
+    # Reconnect automatically, but only after 5 seconds so we don't
+    # flood identifies
+    Kernel.spawn_link(fn ->
+      Process.sleep(5000)
+      connect(self())
+    end)
 
-    connect(self())
-
-    {:noreply, State.clear_conn_data(state)}
+    {:noreply, State.clear_conn(state)}
   end
 
   defp on_gun_error(state = %State{}, reason) do
@@ -161,36 +98,25 @@ defmodule Discord.Gateway.Server do
     {:noreply, state}
   end
 
-  # TODO: :DOWN is when supervised proceses fail, not when we fail
-  defp on_down(state = %State{conn_pid: conn_pid}) do
-    IO.puts("#{__MODULE__} encountered a fatal error. Crashing.")
-
-    if conn_pid != nil do
-      :gun.close(conn_pid)
-    end
-
-    # TODO: send the state off to the agent
-    {:noreply, state}
-  end
-
   # GenServer Handlers
 
   # :connect
-  def handle_cast(:connect, state = %State{}), do: connect_handler(state)
+  def handle_cast(:connect, state = %State{}), do: ServerHandlers.handle_connect(state)
 
   def handle_cast({:disconnect, last_stream_ref}, state = %State{}),
-    do: disconnect_handler(state, last_stream_ref)
+    do: ServerHandlers.handle_disconnect(state, last_stream_ref)
 
   # :send_identify
   def handle_cast({:send_identify, last_stream_ref}, state = %State{}),
-    do: send_identify_handler(state, last_stream_ref)
+    do: ServerHandlers.handle_send_identify(state, last_stream_ref)
+
+  # :send_resume
+  def handle_cast({:send_resume, last_stream_ref, session_id}, state = %State{}),
+    do: ServerHandlers.handle_send_resume(state, last_stream_ref, session_id)
 
   # :send_heartbeat (takes a conn_pid so the scheduled calls don't send for the wrong connection)
   def handle_cast({:send_heartbeat, last_stream_ref}, state = %State{}),
-    do: send_heartbeat_handler(state, last_stream_ref)
-
-  # :DOWN
-  def handle_info(:DOWN, state = %State{}), do: on_down(state)
+    do: ServerHandlers.handle_send_heartbeat(state, last_stream_ref)
 
   # :gun_up
   def handle_info({:gun_up, conn_pid, protocol}, state = %State{}),
